@@ -39,6 +39,7 @@ local hiddenChunks = {}
 local visibleChunks = {}
 local playerChars = {}
 local connections = {}
+local largeHiddenNodes = {}
 local humanoidCache = setmetatable({}, {__mode = "k"})
 local spawnCache = setmetatable({}, {__mode = "k"})
 
@@ -74,12 +75,13 @@ local restoreThreshold = baseHideThreshold - 40
 local behindHideThreshold = baseBehindHideThreshold
 local behindRestoreThreshold = baseBehindHideThreshold - 20
 
-local minHorizontalDistSq = 5625
+local minHorizontalDistSq = 10000
 local distCheckThresholdSq = 1600
 local scanInterval = 0.1
 
 local fovCosSq = 0.5
 local FAR_CHUNK_DIST_SQ = 81
+local LARGE_RADIUS_THRESHOLD = 80
 
 local standingNode = nil
 local standRayParams = RaycastParams.new()
@@ -106,9 +108,10 @@ local effectClassMap = {
 	Smoke = {needsClear = false},
 	Sparkles = {needsClear = false},
 	Highlight = {needsClear = false},
-	SurfaceGui = {needsClear = false},
-	BillboardGui = {needsClear = false},
-	ProximityPrompt = {needsClear = false}
+	SurfaceGui = {needsClear = false, kickAdornee = true},
+	BillboardGui = {needsClear = false, kickAdornee = true},
+	ProximityPrompt = {needsClear = false},
+	Sound = {needsClear = false, isSound = true}
 }
 
 local function hasSpawnLocation(node)
@@ -167,6 +170,9 @@ local function shouldSkip(node)
 
 		if node:IsA("Seat") then return true end
 		if node.Transparency >= 1 and not node.CanCollide then return true end
+
+		local sz = node.Size
+		if sz.X > 800 or sz.Y > 800 or sz.Z > 800 then return true end
 	end
 
 	if node:GetAttribute("_PooledObject") then return true end
@@ -215,7 +221,7 @@ local function scanEffects(node)
 			if not effects then effects = table.create(16) end
 			count = count + 1
 			effects[count] = child
-			effects[count + 1] = effectData.needsClear
+			effects[count + 1] = effectData
 			count = count + 1
 		end
 	end
@@ -234,32 +240,62 @@ local function toggleEffects(effects, enable, data)
 		end
 		while i <= len do
 			local obj = effects[i]
-			local needsClear = effects[i + 1]
+			local effectData = effects[i + 1]
 			i = i + 2
 
 			if obj and obj.Parent then
-				if data and data.savedEffects then
-					data.savedEffects[idx] = obj.Enabled
-					idx = idx + 1
+				if effectData.isSound then
+					if data and data.savedEffects then
+						data.savedEffects[idx] = obj.IsPlaying
+						idx = idx + 1
+					end
+					if obj.IsPlaying then
+						obj:Pause()
+					end
+				else
+					if data and data.savedEffects then
+						data.savedEffects[idx] = obj.Enabled
+						idx = idx + 1
+					end
+					if effectData.needsClear and obj.Enabled then
+						obj:Clear()
+					end
+					obj.Enabled = false
 				end
-				if needsClear and obj.Enabled then
-					obj:Clear()
-				end
-				obj.Enabled = false
 			end
 		end
 	else
 		local saved = data and data.savedEffects
 		while i <= len do
 			local obj = effects[i]
+			local effectData = effects[i + 1]
 			i = i + 2
 
 			if obj and obj.Parent then
-				if saved and saved[idx] ~= nil then
-					obj.Enabled = saved[idx]
-					idx = idx + 1
+				if effectData.isSound then
+					if saved and saved[idx] ~= nil then
+						if saved[idx] then
+							obj:Play()
+						end
+						idx = idx + 1
+					end
 				else
-					obj.Enabled = true
+					if saved and saved[idx] ~= nil then
+						obj.Enabled = saved[idx]
+						idx = idx + 1
+					else
+						obj.Enabled = true
+					end
+
+					if effectData.kickAdornee then
+						local currentAdornee = obj.Adornee
+						if currentAdornee then
+							obj.Adornee = nil
+							obj.Adornee = currentAdornee
+						elseif obj.Parent and (obj.Parent:IsA("BasePart") or obj.Parent:IsA("Attachment")) then
+							obj.Adornee = obj.Parent
+						end
+					end
 				end
 			end
 		end
@@ -359,6 +395,7 @@ local function removeFromParts(node)
 		parts[node] = nil
 		visibleParts[node] = nil
 		hiddenParts[node] = nil
+		largeHiddenNodes[node] = nil
 
 		partsCount = partsCount - 1
 		if partsCount < 0 then partsCount = 0 end
@@ -374,6 +411,7 @@ local function restoreNode(node, data)
 	data.hidden = false
 	hiddenParts[node] = nil
 	visibleParts[node] = true
+	largeHiddenNodes[node] = nil
 
 	local hChunk = hiddenChunks[data.cKey]
 	if hChunk then
@@ -448,16 +486,31 @@ local function onDescendantAdded(node)
 	local data = owner and parts[owner]
 	if not data then return end
 
-	if not data.effects then data.effects = table.create(4) end
+	if data.effects then
+		for i = 1, #data.effects, 2 do
+			if data.effects[i] == node then
+				return
+			end
+		end
+	else
+		data.effects = table.create(4)
+	end
+
 	local len = #data.effects
 	data.effects[len + 1] = node
-	data.effects[len + 2] = effectData.needsClear
+	data.effects[len + 2] = effectData
 
 	if data.hidden then
-		if effectData.needsClear and node.Enabled then
-			node:Clear()
+		if effectData.isSound then
+			if node.IsPlaying then
+				node:Pause()
+			end
+		else
+			if effectData.needsClear and node.Enabled then
+				node:Clear()
+			end
+			node.Enabled = false
 		end
-		node.Enabled = false
 	end
 end
 
@@ -619,7 +672,8 @@ local function scanNearby(camPos, camLook, vx, vy, vz)
 							local distSq = horizontalSq + dy * dy
 
 							local dot = dx * lx + dy * ly + dz * lz
-							local isInFOV = (dot > 0) and ((dot * dot) >= fovCosSq * distSq)
+							local dotAdj = dot + data.radiusSqrt
+							local isInFOV = (dotAdj > 0) and ((dotAdj * dotAdj) >= fovCosSq * distSq)
 							local baseThresh = isInFOV and hideThreshold or behindHideThreshold
 
 							local threshold = (baseThresh * data.sizeMult) + data.radiusSqrt
@@ -664,6 +718,9 @@ local function processInstantRestores(dt, camPos, camLook, vx, vy, vz)
 
 		local pcx = math.floor(px / chunkSize)
 		local pcz = math.floor(pz / chunkSize)
+		local candidates = table.create(32)
+		local candidateCount = 0
+		local seen = {}
 
 		for k = 1, #chunkOffsets do
 			local off = chunkOffsets[k]
@@ -681,17 +738,49 @@ local function processInstantRestores(dt, camPos, camLook, vx, vy, vz)
 						local distSq = dx * dx + dy * dy + dz * dz
 
 						local dot = dx * lx + dy * ly + dz * lz
-						local isInFOV = (dot > 0) and ((dot * dot) >= fovCosSq * distSq)
+						local dotAdj = dot + data.radiusSqrt
+						local isInFOV = (dotAdj > 0) and ((dotAdj * dotAdj) >= fovCosSq * distSq)
 						local activeRestoreThreshold = isInFOV and restoreThreshold or behindRestoreThreshold
 
 						local threshold = (activeRestoreThreshold * data.sizeMult) + data.radiusSqrt
 						if distSq <= (threshold * threshold) then
-							resCount = resCount + 1
-							toRestoreNow[resCount] = node
+							candidateCount = candidateCount + 1
+							candidates[candidateCount] = {node = node, distSq = distSq}
+							seen[node] = true
 						end
 					end
 				end
 			end
+		end
+
+		for node in largeHiddenNodes do
+			if not seen[node] then
+				local data = parts[node]
+				if data and data.hidden then
+					local dx = data.px - px
+					local dy = data.py - py
+					local dz = data.pz - pz
+					local distSq = dx * dx + dy * dy + dz * dz
+
+					local dot = dx * lx + dy * ly + dz * lz
+					local dotAdj = dot + data.radiusSqrt
+					local isInFOV = (dotAdj > 0) and ((dotAdj * dotAdj) >= fovCosSq * distSq)
+					local activeRestoreThreshold = isInFOV and restoreThreshold or behindRestoreThreshold
+
+					local threshold = (activeRestoreThreshold * data.sizeMult) + data.radiusSqrt
+					if distSq <= (threshold * threshold) then
+						candidateCount = candidateCount + 1
+						candidates[candidateCount] = {node = node, distSq = distSq}
+					end
+				end
+			end
+		end
+
+		table.sort(candidates, function(a, b) return a.distSq < b.distSq end)
+
+		for k = 1, candidateCount do
+			resCount = resCount + 1
+			toRestoreNow[resCount] = candidates[k].node
 		end
 	end
 
@@ -720,7 +809,8 @@ local function processInstantRestores(dt, camPos, camLook, vx, vy, vz)
 			local distSq = dx * dx + dy * dy + dz * dz
 
 			local dot = dx * lx + dy * ly + dz * lz
-			local isInFOV = (dot > 0) and ((dot * dot) >= fovCosSq * distSq)
+			local dotAdj = dot + data.radiusSqrt
+			local isInFOV = (dotAdj > 0) and ((dotAdj * dotAdj) >= fovCosSq * distSq)
 			local activeRestoreThreshold = isInFOV and restoreThreshold or behindRestoreThreshold
 			local threshold = (activeRestoreThreshold * data.sizeMult) + data.radiusSqrt
 
@@ -785,6 +875,10 @@ local function processBatch(dt)
 				end
 				hiddenChunks[data.cKey][node] = true
 
+				if data.radiusSqrt > LARGE_RADIUS_THRESHOLD then
+					largeHiddenNodes[node] = true
+				end
+
 				if isModel or (iterations % 4 == 0) then
 					if (os.clock() - startTime) > maxHideTime then
 						break
@@ -819,7 +913,7 @@ local function cleanup()
 	table.clear(connections); table.clear(parts); table.clear(hiddenParts)
 	table.clear(playerChars); table.clear(toHide); table.clear(visibleParts)
 	table.clear(chunks); table.clear(hiddenChunks); table.clear(visibleChunks)
-	table.clear(toRestoreNow); table.clear(pendingAddQueue)
+	table.clear(toRestoreNow); table.clear(pendingAddQueue); table.clear(largeHiddenNodes)
 end
 
 if script.Parent then
@@ -869,6 +963,12 @@ connections.postsim = RunService.PostSimulation:Connect(function(dt)
 
 	local vel = (hrp and hrp.Parent and hrp.AssemblyLinearVelocity) or Vector3.zero
 	local vx, vy, vz = vel.X * 0.2, vel.Y * 0.2, vel.Z * 0.2
+	local vMagSq = vx * vx + vy * vy + vz * vz
+	local maxVMag = 40
+	if vMagSq > maxVMag * maxVMag then
+		local vScale = maxVMag / math.sqrt(vMagSq)
+		vx, vy, vz = vx * vScale, vy * vScale, vz * vScale
+	end
 
 	if hrp and hrp.Parent then
 		local rayDist = 10 + (humanoid and humanoid.HipHeight or 0)
