@@ -40,6 +40,7 @@ local visibleChunks = {}
 local playerChars = {}
 local connections = {}
 local largeHiddenNodes = {}
+local restoreCandidatePool = {}
 local humanoidCache = setmetatable({}, {__mode = "k"})
 local spawnCache = setmetatable({}, {__mode = "k"})
 
@@ -745,7 +746,14 @@ local function processInstantRestores(dt, camPos, camLook, vx, vy, vz)
 						local threshold = (activeRestoreThreshold * data.sizeMult) + data.radiusSqrt
 						if distSq <= (threshold * threshold) then
 							candidateCount = candidateCount + 1
-							candidates[candidateCount] = {node = node, distSq = distSq}
+							local slot = restoreCandidatePool[candidateCount]
+							if not slot then
+								slot = {}
+								restoreCandidatePool[candidateCount] = slot
+							end
+							slot.node = node
+							slot.distSq = distSq
+							candidates[candidateCount] = slot
 							seen[node] = true
 						end
 					end
@@ -770,7 +778,14 @@ local function processInstantRestores(dt, camPos, camLook, vx, vy, vz)
 					local threshold = (activeRestoreThreshold * data.sizeMult) + data.radiusSqrt
 					if distSq <= (threshold * threshold) then
 						candidateCount = candidateCount + 1
-						candidates[candidateCount] = {node = node, distSq = distSq}
+						local slot = restoreCandidatePool[candidateCount]
+						if not slot then
+							slot = {}
+							restoreCandidatePool[candidateCount] = slot
+						end
+						slot.node = node
+						slot.distSq = distSq
+						candidates[candidateCount] = slot
 					end
 				end
 			end
@@ -914,6 +929,7 @@ local function cleanup()
 	table.clear(playerChars); table.clear(toHide); table.clear(visibleParts)
 	table.clear(chunks); table.clear(hiddenChunks); table.clear(visibleChunks)
 	table.clear(toRestoreNow); table.clear(pendingAddQueue); table.clear(largeHiddenNodes)
+	table.clear(restoreCandidatePool)
 end
 
 if script.Parent then
