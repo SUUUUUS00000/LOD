@@ -281,6 +281,10 @@ local function toggleEffects(effects, enable, data)
 						idx = idx + 1
 					end
 				else
+					if effectData.needsClear then
+						obj:Clear()
+					end
+
 					if saved and saved[idx] ~= nil then
 						obj.Enabled = saved[idx]
 						idx = idx + 1
@@ -447,6 +451,17 @@ local function registerPart(node)
 	addToParts(node)
 end
 
+local function findTrackedAncestor(node)
+	local p = node.Parent
+	local depth = 0
+	while p and p ~= Workspace and depth < 20 do
+		if parts[p] then return p end
+		p = p.Parent
+		depth = depth + 1
+	end
+	return nil
+end
+
 local function cleanupPart(node)
 	if not isRunning then return end
 	if not (node:IsA("BasePart") or node:IsA("Model")) then return end
@@ -458,17 +473,6 @@ local function cleanupPart(node)
 		if node:IsDescendantOf(Workspace) then return end
 		removeFromParts(node)
 	end)
-end
-
-local function findTrackedAncestor(node)
-	local p = node.Parent
-	local depth = 0
-	while p and p ~= Workspace and depth < 20 do
-		if parts[p] then return p end
-		p = p.Parent
-		depth = depth + 1
-	end
-	return nil
 end
 
 local function onDescendantAdded(node)
